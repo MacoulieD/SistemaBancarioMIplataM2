@@ -18,29 +18,28 @@ class CuentaAhorros extends Cuenta {
   calcularIntereses(monto) { return monto * this.#tasaInteres; }
 
   /**
-   * POLIMORFISMO: retirar en Ahorros descuenta monto + 1.5% de interés.
-   * Restricción: monto + interés no puede superar el saldo disponible.
+   * POLIMORFISMO: retirar en Ahorros acredita rendimiento del 1.5% sobre el saldo
+   * antes de procesar el retiro. El interés es un beneficio, no un costo.
    */
   retirar(monto) {
     if (typeof monto !== 'number' || isNaN(monto) || monto <= 0)
       throw new Error('El monto a retirar debe ser mayor a cero.');
     if (this.getEstado() !== EstadoCuenta.ACTIVA)
       throw new Error('La cuenta no está activa.');
-// Calculamos el interés y el total a descontar
-    const interes       = this.calcularIntereses(monto);
-    const totalDescontar= monto + interes;
-// Verificamos que el total a descontar no supere el saldo disponible
-    if (totalDescontar > this.getSaldo())
-      throw new Error(
-        `Saldo insuficiente. Retiro ${this._fmt(monto)} + interés 1.5% (${this._fmt(interes)}) = ${this._fmt(totalDescontar)}. Disponible: ${this._fmt(this.getSaldo())}`
-      );
-// Si todo es válido, descontamos el total (monto + interés) del saldo
-    this._setSaldo(this.getSaldo() - totalDescontar);
+
+    if (monto > this.getSaldo())
+      throw new Error(`Saldo insuficiente. Disponible: ${this._fmt(this.getSaldo())}`);
+
+    // Rendimiento del 1.5% calculado sobre el monto retirado y acreditado en cuenta
+    const interes    = this.calcularIntereses(monto);
+    const saldoFinal = this.getSaldo() - monto + interes;
+
+    this._setSaldo(saldoFinal);
     this.registrarMovimiento(new Movimiento(
       TipoMovimiento.RETIRO, monto, this.getSaldo(),
-      `Retiro ${this._fmt(monto)} + interés 1.5% (${this._fmt(interes)})`
+      `Retiro ${this._fmt(monto)} · Rendimiento acreditado: +${this._fmt(interes)}`
     ));
-    return { monto, interes, totalDescontar, saldoActual: this.getSaldo() };
+    return { monto, interes, saldoFinal, saldoActual: this.getSaldo() };
   }
 
   // ITransferible

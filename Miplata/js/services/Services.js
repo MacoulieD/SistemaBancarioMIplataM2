@@ -102,12 +102,6 @@ class BancoService {
   getClientePorUsuario(usuario) {
     return this.#clientes.find(c => c.getUsuario() === usuario) || null;
   }
-// Elimina un cliente por su ID, removiéndolo del banco
-  eliminarCliente(id) {
-    const idx = this.#clientes.findIndex(c => c.getId() === id);
-    if (idx === -1) throw new Error('Cliente no encontrado.');
-    this.#clientes.splice(idx, 1);
-  }
 // Busca una cuenta por su número entre todos los clientes y la devuelve, o null si no se encuentra (usado para transferencias entre cuentas)
   getCuentaPorNumero(num) {
     for (const c of this.#clientes) {

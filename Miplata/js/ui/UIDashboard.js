@@ -226,6 +226,32 @@ class UIDashboard {
     const ultimoMov  = totalMovs > 0 ? movs[totalMovs - 1].toObject() : null;
 // Adaptamos el contenido de la tarjeta de balance según el tipo de cuenta, mostrando el saldo disponible para Ahorros y Corriente, o el cupo disponible para Tarjeta de Crédito, y también mostrando detalles adicionales relevantes para cada tipo de cuenta; además, para Tarjeta de Crédito se muestran opciones para realizar una compra o pagar la deuda actual
     if (cuenta instanceof TarjetaCredito) {
+      const cliente      = this.#auth.getClienteActivo();
+      const cuentasOrigen= cliente.getCuentas().filter(c => !(c instanceof TarjetaCredito));
+      const todosMovs    = cuenta.obtenerMovimientos();
+      const comprasMovs  = todosMovs.filter(m => m.toObject().tipo === TipoMovimiento.COMPRA_TC);
+      const totalCompras = comprasMovs.reduce((sum, m) => {
+        const obj   = m.toObject();
+        const match = obj.descripcion.match(/a (\d+) cuota/);
+        const n     = match ? parseInt(match[1]) : 1;
+        return sum + cuenta.calcularCuotaMensual(obj.valor, n) * n;
+      }, 0);
+      const totalPagado = todosMovs
+        .filter(m => [TipoMovimiento.PAGO_TC, TipoMovimiento.TRANSFERENCIA_IN].includes(m.toObject().tipo))
+        .reduce((sum, m) => sum + m.toObject().valor, 0);
+      const deudaConIntereses = Math.max(0, totalCompras - totalPagado);
+
+      const opcionesCuotas = comprasMovs.map((m) => {
+        const obj   = m.toObject();
+        const match = obj.descripcion.match(/a (\d+) cuota/);
+        const n     = match ? parseInt(match[1]) : 1;
+        const cuota = cuenta.calcularCuotaMensual(obj.valor, n);
+        return `<option value="cuota_${obj.valor}_${n}">Compra ${fmt(obj.valor)} · ${n} cuota(s) — Pagar: ${fmt(cuota)}</option>`;
+      }).join('');
+      const origenOpts = cuentasOrigen.length
+        ? cuentasOrigen.map(c => `<option value="${c.getNumeroCuenta()}">${c.getTipo()} · ${c.getNumeroCuenta()} — Saldo: ${fmt(c.getSaldo())}</option>`).join('')
+        : '<option disabled>Sin cuentas disponibles</option>';
+
       container.innerHTML = `
         <div class="op-card">
           <h4>Realizar compra</h4>
@@ -243,7 +269,18 @@ class UIDashboard {
         </div>
         <div class="op-card">
           <h4>Pagar deuda</h4>
-          <div class="form-group"><label>Monto a pagar (COP)</label>
+          <div class="form-group"><label>Pagar desde</label>
+            <select id="tc-pago-origen" class="form-control">${origenOpts}</select>
+          </div>
+          <div class="form-group"><label>Tipo de pago</label>
+            <select id="tc-pago-tipo" class="form-control">
+              ${opcionesCuotas}
+              <option value="total">Cancelar deuda total (con intereses) — ${fmt(deudaConIntereses)}</option>
+              <option value="otro">Otro valor</option>
+            </select>
+          </div>
+          <div id="tc-pago-custom-wrap" class="form-group hidden">
+            <label>Monto personalizado (COP)</label>
             <input id="tc-pago-monto" class="form-control" type="number" min="1" placeholder="Ej: 200.000">
           </div>
           <button class="btn-action" id="btn-pagar-tc">Realizar pago</button>
@@ -280,15 +317,31 @@ class UIDashboard {
         } catch(e) { UIHelpers.showAlert('tc-alert', 'error', e.message); }
       });
 // Evento para procesar el pago de la deuda de la tarjeta de crédito, validando el monto ingresado y mostrando un mensaje de éxito con el monto pagado y la deuda restante, o un mensaje de error si el pago no se puede procesar
+      document.getElementById('tc-pago-tipo').addEventListener('change', (e) => {
+        document.getElementById('tc-pago-custom-wrap').classList.toggle('hidden', e.target.value !== 'otro');
+      });
+
       document.getElementById('btn-pagar-tc').addEventListener('click', () => {
-        const monto = parseFloat(document.getElementById('tc-pago-monto').value);
+        const tipoSel  = document.getElementById('tc-pago-tipo').value;
+        const numOrigen= document.getElementById('tc-pago-origen').value;
+        const origen   = cliente.getCuentaPorNumero(numOrigen);
+        if (!origen) { UIHelpers.showAlert('tc-pago-alert','error','Seleccione una cuenta de origen válida.'); return; }
+        let monto;
+        if (tipoSel === 'total') {
+          monto = deudaConIntereses;
+        } else if (tipoSel === 'otro') {
+          monto = parseFloat(document.getElementById('tc-pago-monto').value);
+        } else {
+          const parts = tipoSel.split('_');
+          monto = cuenta.calcularCuotaMensual(parseFloat(parts[1]), parseInt(parts[2]));
+        }
         try {
-          const r = cuenta.pagar(monto);
+          origen.transferir(cuenta, monto);
           this.#banco.save();
-          UIHelpers.showAlert('tc-pago-alert', 'success', `Pago de ${fmt(r.montoPagado)} aplicado. Deuda restante: ${fmt(r.deudaRestante)}`);
+          UIHelpers.showAlert('tc-pago-alert', 'success', `Pago de ${fmt(monto)} realizado desde ${origen.getTipo()}. Deuda restante: ${fmt(cuenta.getDeuda())}`);
           UIHelpers.autoHideAlert('tc-pago-alert');
           this.#renderBalanceCard();
-          document.getElementById('tc-pago-monto').value = '';
+          this.#renderSaldo();
         } catch(e) { UIHelpers.showAlert('tc-pago-alert', 'error', e.message); }
       });
 // Para Cuenta de Ahorros y Corriente mostramos el saldo disponible, la tasa de interés o el límite con sobregiro, y también información sobre los movimientos registrados en la cuenta, incluyendo la fecha del último movimiento o un mensaje indicando que no hay movimientos aún
@@ -320,9 +373,9 @@ class UIDashboard {
             <div class="saldo-stat-card">
               <div class="saldo-stat-icon">${Icons.chart}</div>
               <div class="saldo-stat-body">
-                <div class="saldo-stat-label">Interés proyectado</div>
-                <div class="saldo-stat-value">${fmt(interes)}</div>
-                <div class="saldo-stat-hint">Si retira el saldo completo</div>
+                <div class="saldo-stat-label">Rendimiento proyectado</div>
+                <div class="saldo-stat-value c-green">${fmt(interes)}</div>
+                <div class="saldo-stat-hint">Se acredita en su próximo retiro</div>
               </div>
             </div>
             <div class="saldo-stat-card">
@@ -391,11 +444,11 @@ class UIDashboard {
     const cuentaActiva= this.#auth.getCuentaActiva();
     const fmt         = UIHelpers.fmt;
 // Filtramos las cuentas elegibles para consignar, que son las cuentas de ahorros y corriente, excluyendo las tarjetas de crédito; si no hay cuentas elegibles, mostramos un mensaje indicando que no se pueden realizar consignaciones
-    const elegibles = cliente.getCuentas().filter(c => !(c instanceof TarjetaCredito));
+    const elegibles = cliente.getCuentas().filter(c => !(c instanceof TarjetaCredito) && c.getNumeroCuenta() !== cuentaActiva.getNumeroCuenta());
 
     if (elegibles.length === 0) {
       document.getElementById('consignar-content').innerHTML =
-        `<div class="info-box warn">${Icons.alert}<span>No tiene cuentas disponibles para consignar. Las consignaciones aplican a Cuenta de Ahorros y Cuenta Corriente.</span></div>`;
+        `<div class="info-box warn">${Icons.alert}<span>No tiene otras cuentas disponibles para consignar. Abra una cuenta adicional para realizar esta operación.</span></div>`;
       return;
     }
 // Creamos las opciones del select para elegir la cuenta destino, mostrando el tipo de cuenta, número y saldo actual, y marcando como seleccionada la cuenta activa por defecto; luego mostramos el formulario para ingresar el monto a consignar y el botón para procesar la consignación, junto con un contenedor para mostrar mensajes de éxito o error
@@ -424,17 +477,14 @@ class UIDashboard {
       const destino = cliente.getCuentaPorNumero(num);
       if (!destino) { UIHelpers.showAlert('cons-alert','error','Cuenta no encontrada.'); return; }
       try {
-        destino.consignar(monto);
+        cuentaActiva.transferir(destino, monto);
         this.#banco.save();
-        // Actualizar labels del select con nuevos saldos
-        const sel = document.getElementById('cons-cuenta');
-        Array.from(sel.options).forEach(opt => {
-          const c = cliente.getCuentaPorNumero(opt.value);
-          if (c) opt.text = `${c.getTipo()} · ${c.getNumeroCuenta()} — Saldo: ${fmt(c.getSaldo())}`;
-        });
-        UIHelpers.showAlert('cons-alert','success',`Consignación exitosa en ${destino.getTipo()}. Nuevo saldo: ${fmt(destino.getSaldo())}`);
+        UIHelpers.showAlert('cons-alert','success',
+          `Consignación exitosa. Debitado de ${cuentaActiva.getTipo()}: ${fmt(monto)} · Nuevo saldo origen: ${fmt(cuentaActiva.getSaldo())} · Nuevo saldo ${destino.getTipo()}: ${fmt(destino.getSaldo())}`
+        );
         UIHelpers.autoHideAlert('cons-alert');
         this.#renderBalanceCard();
+        this.#renderAccountTabs();
         document.getElementById('cons-monto').value = '';
       } catch(e) { UIHelpers.showAlert('cons-alert','error',e.message); }
     });
@@ -447,7 +497,7 @@ class UIDashboard {
     let infoHtml = '';
 // Adaptamos el contenido del panel de retiro según el tipo de cuenta, mostrando información relevante para cada tipo de cuenta: para Cuenta de Ahorros se muestra la tasa de interés aplicada a los retiros; para Cuenta Corriente se muestra el límite de retiro con sobregiro; para Tarjeta de Crédito se muestra una advertencia indicando que no se pueden realizar retiros y que deben usar la opción de consultar saldo para realizar compras a cuotas
     if (cuenta instanceof CuentaAhorros) {
-      infoHtml = `<div class="info-box warn">${Icons.alert}<span>Se aplica interés del <strong>1.5% mensual</strong> sobre el monto retirado.</span></div>`;
+      infoHtml = `<div class="info-box info">${Icons.shield}<span>Tu cuenta genera un rendimiento del <strong>1.5% mensual</strong> sobre tu saldo. El rendimiento se acredita automáticamente en cada retiro.</span></div>`;
     } else if (cuenta instanceof CuentaCorriente) {
       infoHtml = `<div class="info-box warn">${Icons.alert}<span>Límite de retiro con sobregiro del 20%: <strong>${fmt(cuenta.getLimiteRetiro())}</strong></span></div>`;
     } else if (cuenta instanceof TarjetaCredito) {
@@ -473,10 +523,15 @@ class UIDashboard {
         const r = cuenta.retirar(monto);
         this.#banco.save();
         let msg = `Retiro exitoso. Nuevo saldo: ${fmt(cuenta.getSaldo())}`;
-        if (r && r.interes) msg = `Retiro ${fmt(monto)} + interés ${fmt(r.interes)} = ${fmt(r.totalDescontar)} deducidos. Saldo: ${fmt(cuenta.getSaldo())}`;
+        if (r && r.interes) msg = `Retiro: ${fmt(r.monto)} · Interés aplicado: +${fmt(r.interes)} · Saldo restante: ${fmt(cuenta.getSaldo())}`;
         UIHelpers.showAlert('ret-alert','success', msg);
         UIHelpers.autoHideAlert('ret-alert');
         this.#renderBalanceCard();
+        if (cuenta instanceof CuentaCorriente) {
+          const infoEl = document.querySelector('#retirar-content .info-box');
+          if (infoEl) infoEl.querySelector('span').innerHTML =
+            `Límite de retiro con sobregiro del 20%: <strong>${fmt(cuenta.getLimiteRetiro())}</strong>`;
+        }
         document.getElementById('ret-monto').value = '';
       } catch(e) { UIHelpers.showAlert('ret-alert','error',e.message); }
     });
@@ -552,7 +607,9 @@ class UIDashboard {
         infoEl.className = ''; destinoTerceroVerificado = null; return;
       }
       destinoTerceroVerificado = cuentaDestino;
-      infoEl.innerHTML = `<div class="dest-confirmed">${Icons.check}<span>Cuenta verificada: <strong>${cuentaDestino.getTipo()} · ${cuentaDestino.getNumeroCuenta()}</strong></span></div>`;
+      const titularDestino = this.#banco.getClientes().find(c => c.getCuentaPorNumero(cuentaDestino.getNumeroCuenta()));
+      const nombreTitular  = titularDestino ? titularDestino.getNombreCompleto() : '';
+      infoEl.innerHTML = `<div class="dest-confirmed">${Icons.check}<span>Cuenta verificada: <strong>${cuentaDestino.getTipo()} · ${cuentaDestino.getNumeroCuenta()}</strong>${nombreTitular ? ` · Titular: <strong>${nombreTitular}</strong>` : ''}</span></div>`;
       infoEl.className = '';
     });
 // Configuramos el evento para procesar la transferencia al hacer clic en el botón correspondiente, validando el monto ingresado y mostrando un mensaje de éxito con los detalles de la transferencia o un mensaje de error si la transferencia no se puede procesar; además, para transferencias a terceros se asegura que se ha verificado la cuenta destino antes de permitir realizar la transferencia
@@ -565,6 +622,7 @@ class UIDashboard {
         const num = document.getElementById('trans-cuenta-propia').value;
         destino = cliente.getCuentaPorNumero(num);
         if (!destino) { UIHelpers.showAlert('trans-alert','error','Seleccione una cuenta destino válida.'); return; }
+        if (destino.getNumeroCuenta() === cuentaOrigen.getNumeroCuenta()) { UIHelpers.showAlert('trans-alert','error','No puede transferir a la misma cuenta.'); return; }
       } else {
         if (!destinoTerceroVerificado) { UIHelpers.showAlert('trans-alert','warning','Debe verificar la cuenta destino antes de transferir.'); return; }
         destino = destinoTerceroVerificado;
@@ -585,12 +643,16 @@ class UIDashboard {
       try {
         cuentaOrigen.transferir(destino, monto);
         this.#banco.save();
+        const esTercero = tipo === 'tercero';
         const msg = destino instanceof TarjetaCredito
-          ? `Abono de ${fmt(monto)} aplicado a Tarjeta de Crédito. Deuda restante: ${fmt(destino.getDeuda())}.`
-          : `Transferencia de ${fmt(monto)} realizada a ${destino.getTipo()} ${destino.getNumeroCuenta()}.`;
+          ? `Abono de ${fmt(monto)} aplicado. Saldo origen: ${fmt(cuentaOrigen.getSaldo())} · Deuda restante TC: ${fmt(destino.getDeuda())}.`
+          : esTercero
+            ? `Transferencia de ${fmt(monto)} realizada. Nuevo saldo: ${fmt(cuentaOrigen.getSaldo())}.`
+            : `Transferencia exitosa. Saldo origen: ${fmt(cuentaOrigen.getSaldo())} · Saldo destino: ${fmt(destino.getSaldo())}.`;
         UIHelpers.showAlert('trans-alert','success', msg);
         UIHelpers.autoHideAlert('trans-alert');
         this.#renderBalanceCard();
+        this.#renderAccountTabs();
         document.getElementById('trans-monto').value = '';
         destinoTerceroVerificado = null;
       } catch(e) { UIHelpers.showAlert('trans-alert','error',e.message); }

@@ -17,7 +17,9 @@ class CuentaCorriente extends Cuenta {
   getPorcentajeSobregiro() { return this.#porcentajeSobregiro; }
 // Método para calcular el límite de retiro considerando el sobregiro permitido
   getLimiteRetiro() {
-    return this.getSaldo() + (this.getSaldo() * this.#porcentajeSobregiro);
+    const saldo = this.getSaldo();
+    if (saldo <= 0) return 0;
+    return saldo + (saldo * this.#porcentajeSobregiro);
   }
 
   /**
