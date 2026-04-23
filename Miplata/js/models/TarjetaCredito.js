@@ -2,55 +2,67 @@
  * HERENCIA + POLIMORFISMO
  * TarjetaCredito extiende Cuenta.
  * Cupo fijo: $4.000.000. Se obtiene por solicitud en el dashboard.
- * retirar() = comprar() a las cuotas elegidas por el usuario.
- * Motor financiero con tabla de tasas variables.
+ * #compras rastrea cada compra con cuotasPagadas para mostrar estado individual.
  */
 class TarjetaCredito extends Cuenta {
   #cupo;
   #deuda;
-// El constructor puede recibir un objeto para restaurar desde almacenamiento
+  #deudaConIntereses;
+  #compras; // [{ id, monto, cuotas, cuotaMensual, cuotasPagadas }]
+
   static CUPO_MAXIMO = 4000000;
-// El constructor puede recibir un objeto para restaurar desde almacenamiento o parámetros para crear una nueva tarjeta
+
   constructor(numeroCuenta) {
     super(numeroCuenta, 0);
     if (numeroCuenta && typeof numeroCuenta === 'object' && numeroCuenta.__restore) {
-      this.#cupo  = TarjetaCredito.CUPO_MAXIMO;
-      this.#deuda = numeroCuenta.deuda || 0;
+      this.#cupo    = TarjetaCredito.CUPO_MAXIMO;
+      this.#deuda   = numeroCuenta.deuda || 0;
+      this.#compras = (numeroCuenta.compras || []).map(c => ({ ...c }));
+      if (numeroCuenta.deudaConIntereses !== undefined) {
+        this.#deudaConIntereses = numeroCuenta.deudaConIntereses;
+      } else {
+        // Recalcular desde movimientos almacenados (compatibilidad con datos anteriores)
+        const movs = numeroCuenta.movimientos || [];
+        const totalCompras = movs
+          .filter(m => m.tipo === 'COMPRA_TC')
+          .reduce((sum, m) => {
+            const match = (m.descripcion || '').match(/a (\d+) cuota/);
+            const n = match ? parseInt(match[1]) : 1;
+            return sum + this.calcularCuotaMensual(m.valor, n) * n;
+          }, 0);
+        const totalPagado = movs
+          .filter(m => m.tipo === 'PAGO_TC' || m.tipo === 'TRANSFERENCIA_IN')
+          .reduce((sum, m) => sum + (m.valor || 0), 0);
+        this.#deudaConIntereses = Math.max(0, totalCompras - totalPagado);
+      }
       return;
     }
-    this.#cupo  = TarjetaCredito.CUPO_MAXIMO;
-    this.#deuda = 0;
+    this.#cupo              = TarjetaCredito.CUPO_MAXIMO;
+    this.#deuda             = 0;
+    this.#deudaConIntereses = 0;
+    this.#compras           = [];
   }
-// Getters para atributos privados
-  getTipo()   { return 'Tarjeta de Crédito'; }
-  getCodigo() { return 'TC'; }
-  getCupo()           { return this.#cupo; }
-  getDeuda()          { return this.#deuda; }
-  getCupoDisponible() { return this.#cupo - this.#deuda; }
 
-  /**
-   * Tabla de tasas mensuales:
-   * <= 2 cuotas → 0%
-   * 3 – 6 cuotas → 1.9% mensual
-   * >= 7 cuotas → 2.3% mensual
-   */
+  getTipo()              { return 'Tarjeta de Crédito'; }
+  getCodigo()            { return 'TC'; }
+  getCupo()              { return this.#cupo; }
+  getDeuda()             { return this.#deuda; }
+  getDeudaConIntereses() { return this.#deudaConIntereses; }
+  getCupoDisponible()    { return this.#cupo - this.#deuda; }
+  getCompras()           { return this.#compras.map(c => ({ ...c })); }
+
   calcularTasa(cuotas) {
     if (cuotas <= 2) return 0;
     if (cuotas <= 6) return 0.019;
     return 0.023;
   }
 
-  /**
-   * Fórmula cuota amortizada:
-   * Cuota = (Capital × tasa) / (1 − (1 + tasa)^−n)
-   * Si tasa = 0: Cuota = Capital / n
-   */
   calcularCuotaMensual(capital, cuotas) {
     const tasa = this.calcularTasa(cuotas);
     if (tasa === 0) return capital / cuotas;
     return (capital * tasa) / (1 - Math.pow(1 + tasa, -cuotas));
   }
-// POLIMORFISMO: comprar() registra la compra con las cuotas elegidas y calcula la deuda total incluyendo intereses
+
   comprar(monto, cuotas) {
     if (typeof monto !== 'number' || isNaN(monto) || monto <= 0)
       throw new Error('El monto de compra debe ser mayor a cero.');
@@ -60,74 +72,87 @@ class TarjetaCredito extends Cuenta {
       throw new Error('La tarjeta no está activa.');
     if (monto > this.getCupoDisponible())
       throw new Error(`Cupo insuficiente. Disponible: ${this._fmt(this.getCupoDisponible())}`);
-// Si la validación es exitosa, registramos la compra y actualizamos la deuda total
-    this.#deuda += monto;
-    const tasa        = this.calcularTasa(cuotas);
-    const cuotaMensual= this.calcularCuotaMensual(monto, cuotas);
-// Registramos el movimiento de compra con detalles de cuotas e intereses
+
+    const tasa         = this.calcularTasa(cuotas);
+    const cuotaMensual = this.calcularCuotaMensual(monto, cuotas);
+    this.#deuda             += monto;
+    this.#deudaConIntereses += cuotaMensual * cuotas;
+    this.#compras.push({ id: Date.now(), monto, cuotas, cuotaMensual, cuotasPagadas: 0 });
+
     this.registrarMovimiento(new Movimiento(
-      TipoMovimiento.COMPRA_TC, monto, this.getSaldo(),
+      TipoMovimiento.COMPRA_TC, monto, this.getCupoDisponible(),
       `Compra ${this._fmt(monto)} a ${cuotas} cuota(s) · Cuota mensual: ${this._fmt(cuotaMensual)} · Tasa: ${(tasa * 100).toFixed(1)}%`
     ));
-    return { monto, cuotas, tasa, cuotaMensual, deudaTotal: this.#deuda, cupoDisponible: this.getCupoDisponible() };
+    return { monto, cuotas, tasa, cuotaMensual, deudaTotal: this.#deudaConIntereses, cupoDisponible: this.getCupoDisponible() };
   }
-// POLIMORFISMO: pagar() permite abonar a la deuda de la tarjeta, reduciendo el monto adeudado
+
+  #marcarCuotas(monto) {
+    let restante = monto;
+    for (const c of this.#compras) {
+      while (c.cuotasPagadas < c.cuotas && restante >= c.cuotaMensual - 0.01) {
+        restante -= c.cuotaMensual;
+        c.cuotasPagadas++;
+      }
+    }
+  }
+
   pagar(monto) {
     if (typeof monto !== 'number' || isNaN(monto) || monto <= 0)
       throw new Error('El pago debe ser mayor a cero.');
-    if (this.#deuda === 0)
+    if (this.#deudaConIntereses === 0)
       throw new Error('No tiene deuda pendiente.');
-    if (monto > this.#deuda)
-      throw new Error(`El pago (${this._fmt(monto)}) supera la deuda actual (${this._fmt(this.#deuda)}).`);
-// Si la validación es exitosa, registramos el pago y actualizamos la deuda restante
-    this.#deuda -= monto;
+    if (monto > this.#deudaConIntereses)
+      throw new Error(`El pago (${this._fmt(monto)}) supera la deuda total (${this._fmt(this.#deudaConIntereses)}).`);
+
+    this.#deuda             = Math.max(0, this.#deuda             - monto);
+    this.#deudaConIntereses = Math.max(0, this.#deudaConIntereses - monto);
+    this.#marcarCuotas(monto);
     this.registrarMovimiento(new Movimiento(
-      TipoMovimiento.PAGO_TC, monto, this.getSaldo(),
-      `Pago tarjeta ${this._fmt(monto)}. Deuda restante: ${this._fmt(this.#deuda)}`
+      TipoMovimiento.PAGO_TC, monto, this.getCupoDisponible(),
+      `Pago tarjeta ${this._fmt(monto)}. Deuda restante: ${this._fmt(this.#deudaConIntereses)}`
     ));
-    return { montoPagado: monto, deudaRestante: this.#deuda };
+    return { montoPagado: monto, deudaRestante: this.#deudaConIntereses };
   }
 
-  /** POLIMORFISMO: retirar en TC = comprar a las cuotas que elija el usuario */
-  retirar(monto, cuotas = 1) {
-    return this.comprar(monto, cuotas);
-  }
+  retirar(monto, cuotas = 1) { return this.comprar(monto, cuotas); }
 
-  // ITransferible
   validarDestino(destino) {
     if (!destino) throw new Error('Cuenta destino no válida.');
     if (destino.getNumeroCuenta() === this.getNumeroCuenta())
       throw new Error('No se permite transferir al mismo producto.');
     return true;
   }
-// ITransferible
+
   transferir(destino, monto) {
     this.validarDestino(destino);
     if (typeof monto !== 'number' || isNaN(monto) || monto <= 0)
       throw new Error('El monto a transferir debe ser mayor a cero.');
     if (monto > this.getCupoDisponible())
       throw new Error(`Cupo insuficiente. Disponible: ${this._fmt(this.getCupoDisponible())}`);
-// Si la validación es exitosa, realizamos la transferencia registrando un avance en efectivo (similar a una compra) y actualizando la deuda
-    this.#deuda += monto;
+    this.#deuda             += monto;
+    this.#deudaConIntereses += monto;
     this.registrarMovimiento(new Movimiento(
-      TipoMovimiento.TRANSFERENCIA_OUT, monto, this.getSaldo(),
+      TipoMovimiento.TRANSFERENCIA_OUT, monto, this.getCupoDisponible(),
       `Avance en efectivo a cuenta ${destino.getNumeroCuenta()}`
     ));
     destino._recibirTransferencia(monto, this.getNumeroCuenta());
   }
-// Método para recibir una transferencia (usado por transferir() de otras cuentas)
+
   _recibirTransferencia(monto, origen) {
-    this.#deuda = Math.max(0, this.#deuda - monto);
+    this.#deuda             = Math.max(0, this.#deuda             - monto);
+    this.#deudaConIntereses = Math.max(0, this.#deudaConIntereses - monto);
+    this.#marcarCuotas(monto);
     this.registrarMovimiento(new Movimiento(
-      TipoMovimiento.TRANSFERENCIA_IN, monto, this.getSaldo(),
-      `Abono recibido desde cuenta ${origen}. Deuda restante: ${this._fmt(this.#deuda)}`
+      TipoMovimiento.TRANSFERENCIA_IN, monto, this.getCupoDisponible(),
+      `Abono recibido desde cuenta ${origen}. Deuda restante: ${this._fmt(this.#deudaConIntereses)}`
     ));
   }
-// Convierte la cuenta a un objeto plano para almacenamiento o transferencia
+
   toObject() {
-    return { ...super.toObject(), cupo: this.#cupo, deuda: this.#deuda, cupoDisponible: this.getCupoDisponible() };
+    return { ...super.toObject(), cupo: this.#cupo, deuda: this.#deuda, deudaConIntereses: this.#deudaConIntereses, cupoDisponible: this.getCupoDisponible() };
   }
-// Convierte la cuenta a un objeto plano para almacenamiento, incluyendo movimientos (usado internamente)
-  toStorageObject() { return { ...super.toStorageObject(), deuda: this.#deuda }; }
+  toStorageObject() {
+    return { ...super.toStorageObject(), deuda: this.#deuda, deudaConIntereses: this.#deudaConIntereses, compras: this.#compras };
+  }
   static fromObject(obj) { return new TarjetaCredito({ __restore: true, ...obj }); }
 }

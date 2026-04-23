@@ -163,7 +163,7 @@ class UIDashboard {
       amount = fmt(cuenta.getCupoDisponible());
       meta   = `
         <div class="balance-meta-item"><div class="meta-label">Cupo total</div><div class="meta-value">${fmt(cuenta.getCupo())}</div></div>
-        <div class="balance-meta-item"><div class="meta-label">Deuda actual</div><div class="meta-value" style="color:#e74c3c">${fmt(cuenta.getDeuda())}</div></div>`;
+        <div class="balance-meta-item"><div class="meta-label">Deuda con intereses</div><div class="meta-value" style="color:#e74c3c">${fmt(cuenta.getDeudaConIntereses())}</div></div>`;
     } else if (cuenta instanceof CuentaCorriente) {
       amount = fmt(cuenta.getSaldo());
       meta   = `<div class="balance-meta-item"><div class="meta-label">Límite con sobregiro</div><div class="meta-value">${fmt(cuenta.getLimiteRetiro())}</div></div>`;
@@ -228,26 +228,26 @@ class UIDashboard {
     if (cuenta instanceof TarjetaCredito) {
       const cliente      = this.#auth.getClienteActivo();
       const cuentasOrigen= cliente.getCuentas().filter(c => !(c instanceof TarjetaCredito));
-      const todosMovs    = cuenta.obtenerMovimientos();
-      const comprasMovs  = todosMovs.filter(m => m.toObject().tipo === TipoMovimiento.COMPRA_TC);
-      const totalCompras = comprasMovs.reduce((sum, m) => {
-        const obj   = m.toObject();
-        const match = obj.descripcion.match(/a (\d+) cuota/);
-        const n     = match ? parseInt(match[1]) : 1;
-        return sum + cuenta.calcularCuotaMensual(obj.valor, n) * n;
-      }, 0);
-      const totalPagado = todosMovs
-        .filter(m => [TipoMovimiento.PAGO_TC, TipoMovimiento.TRANSFERENCIA_IN].includes(m.toObject().tipo))
-        .reduce((sum, m) => sum + m.toObject().valor, 0);
-      const deudaConIntereses = Math.max(0, totalCompras - totalPagado);
+      const compras           = cuenta.getCompras();
+      const deudaConIntereses = cuenta.getDeudaConIntereses();
 
-      const opcionesCuotas = comprasMovs.map((m) => {
-        const obj   = m.toObject();
-        const match = obj.descripcion.match(/a (\d+) cuota/);
-        const n     = match ? parseInt(match[1]) : 1;
-        const cuota = cuenta.calcularCuotaMensual(obj.valor, n);
-        return `<option value="cuota_${obj.valor}_${n}">Compra ${fmt(obj.valor)} · ${n} cuota(s) — Pagar: ${fmt(cuota)}</option>`;
+      const pagoMinimo = compras.reduce((s, c) => c.cuotasPagadas < c.cuotas ? s + c.cuotaMensual : s, 0);
+
+      const opcionesCuotas = compras.map((c, idx) => {
+        const restantes   = c.cuotas - c.cuotasPagadas;
+        const cuotasItems = Array.from({ length: c.cuotas }, (_, i) => {
+          const num    = i + 1;
+          const pagada = i < c.cuotasPagadas;
+          return pagada
+            ? `<option disabled>✓ Cuota ${num} — CANCELADA</option>`
+            : `<option value="cuota_${c.id}_1">Cuota ${num} — ${fmt(c.cuotaMensual)}</option>`;
+        }).join('');
+        const totalOpt = restantes > 0
+          ? `<option value="tc_${c.id}_all">Cancelar compra completa (${restantes} cuota(s)) — ${fmt(c.cuotaMensual * restantes)}</option>`
+          : `<option disabled>✓ Compra totalmente cancelada</option>`;
+        return `<optgroup label="Compra #${idx + 1}: ${fmt(c.monto)} · ${c.cuotasPagadas}/${c.cuotas} pagadas">${cuotasItems}${totalOpt}</optgroup>`;
       }).join('');
+
       const origenOpts = cuentasOrigen.length
         ? cuentasOrigen.map(c => `<option value="${c.getNumeroCuenta()}">${c.getTipo()} · ${c.getNumeroCuenta()} — Saldo: ${fmt(c.getSaldo())}</option>`).join('')
         : '<option disabled>Sin cuentas disponibles</option>';
@@ -274,6 +274,7 @@ class UIDashboard {
           </div>
           <div class="form-group"><label>Tipo de pago</label>
             <select id="tc-pago-tipo" class="form-control">
+              ${compras.filter(c => c.cuotasPagadas < c.cuotas).length > 1 ? `<option value="minimo">Pago mínimo (1 cuota por compra) — ${fmt(pagoMinimo)}</option>` : ''}
               ${opcionesCuotas}
               <option value="total">Cancelar deuda total (con intereses) — ${fmt(deudaConIntereses)}</option>
               <option value="otro">Otro valor</option>
@@ -329,16 +330,29 @@ class UIDashboard {
         let monto;
         if (tipoSel === 'total') {
           monto = deudaConIntereses;
+        } else if (tipoSel === 'minimo') {
+          monto = pagoMinimo;
         } else if (tipoSel === 'otro') {
           monto = parseFloat(document.getElementById('tc-pago-monto').value);
+        } else if (tipoSel.startsWith('tc_')) {
+          // tc_<id>_all → pagar todas las cuotas restantes de esa compra
+          const id = parseInt(tipoSel.split('_')[1]);
+          const c  = compras.find(x => x.id === id);
+          if (!c) { UIHelpers.showAlert('tc-pago-alert','error','Compra no encontrada.'); return; }
+          monto = c.cuotaMensual * (c.cuotas - c.cuotasPagadas);
+        } else if (tipoSel.startsWith('cuota_')) {
+          // cuota_<id>_1 → pagar 1 cuota de esa compra
+          const id = parseInt(tipoSel.split('_')[1]);
+          const c  = compras.find(x => x.id === id);
+          if (!c) { UIHelpers.showAlert('tc-pago-alert','error','Compra no encontrada.'); return; }
+          monto = c.cuotaMensual;
         } else {
-          const parts = tipoSel.split('_');
-          monto = cuenta.calcularCuotaMensual(parseFloat(parts[1]), parseInt(parts[2]));
+          UIHelpers.showAlert('tc-pago-alert','error','Seleccione una opción de pago válida.'); return;
         }
         try {
           origen.transferir(cuenta, monto);
           this.#banco.save();
-          UIHelpers.showAlert('tc-pago-alert', 'success', `Pago de ${fmt(monto)} realizado desde ${origen.getTipo()}. Deuda restante: ${fmt(cuenta.getDeuda())}`);
+          UIHelpers.showAlert('tc-pago-alert', 'success', `Pago de ${fmt(monto)} aplicado. Cupo disponible: ${fmt(cuenta.getCupoDisponible())} · Deuda restante: ${fmt(cuenta.getDeudaConIntereses())}`);
           UIHelpers.autoHideAlert('tc-pago-alert');
           this.#renderBalanceCard();
           this.#renderSaldo();
@@ -542,15 +556,18 @@ class UIDashboard {
     const cliente      = this.#auth.getClienteActivo();
     const cuentaOrigen = this.#auth.getCuentaActiva();
     const fmt          = UIHelpers.fmt;
-// Filtramos las cuentas propias del cliente para mostrar como opciones de transferencia, excluyendo la cuenta origen, y formateamos las opciones del select con el tipo de cuenta y número; además, si la cuenta origen es una Tarjeta de Crédito, mostramos una advertencia indicando que se trata de un avance en efectivo que se cargará a la deuda, junto con el cupo disponible
+
+    if (cuentaOrigen instanceof TarjetaCredito) {
+      document.getElementById('transferir-content').innerHTML =
+        `<div class="info-box warn">${Icons.alert}<span>La Tarjeta de Crédito no permite realizar transferencias. Use una <strong>Cuenta de Ahorros</strong> o <strong>Cuenta Corriente</strong>.</span></div>`;
+      return;
+    }
+
     const propias = cliente.getCuentas()
-      .filter(c => c.getNumeroCuenta() !== cuentaOrigen.getNumeroCuenta())
+      .filter(c => c.getNumeroCuenta() !== cuentaOrigen.getNumeroCuenta() && !(c instanceof TarjetaCredito))
       .map(c => `<option value="${c.getNumeroCuenta()}">${c.getTipo()} · ${c.getNumeroCuenta()}</option>`)
       .join('');
-// Si la cuenta origen es una Tarjeta de Crédito, mostramos una advertencia indicando que se trata de un avance en efectivo que se cargará a la deuda, junto con el cupo disponible; luego mostramos el formulario para realizar la transferencia, con opciones para elegir entre transferencias a cuentas propias o a terceros, y campos para ingresar el monto a transferir y el número de cuenta destino (para terceros), junto con un botón para procesar la transferencia y un contenedor para mostrar mensajes de éxito o error
-    const origenInfo = cuentaOrigen instanceof TarjetaCredito
-      ? `<div class="info-box warn">${Icons.alert}<span>Avance en efectivo desde Tarjeta de Crédito. Se cargará a su deuda. Cupo disponible: <strong>${fmt(cuentaOrigen.getCupoDisponible())}</strong></span></div>`
-      : '';
+    const origenInfo = '';
 // Mostramos el formulario para realizar la transferencia, con opciones para elegir entre transferencias a cuentas propias o a terceros, y campos para ingresar el monto a transferir y el número de cuenta destino (para terceros), junto con un botón para procesar la transferencia y un contenedor para mostrar mensajes de éxito o error; además, se muestra una información adicional relevante si la cuenta origen es una Tarjeta de Crédito
     document.getElementById('transferir-content').innerHTML = `
       ${origenInfo}
@@ -630,12 +647,12 @@ class UIDashboard {
 // Validamos el monto ingresado para la transferencia, asegurando que sea un número válido y mayor a cero; además, si la cuenta destino es una Tarjeta de Crédito, se valida que el monto a transferir no supere la deuda actual de la tarjeta, mostrando un mensaje de error si el monto es inválido o supera la deuda
       // Validar TC como destino
       if (destino instanceof TarjetaCredito) {
-        if (destino.getDeuda() === 0) {
+        if (destino.getDeudaConIntereses() === 0) {
           UIHelpers.showAlert('trans-alert','warning','La Tarjeta de Crédito no tiene deuda pendiente.');
           return;
         }
-        if (!isNaN(monto) && monto > destino.getDeuda()) {
-          UIHelpers.showAlert('trans-alert','error',`El monto supera la deuda actual (${fmt(destino.getDeuda())}). Máximo a abonar: ${fmt(destino.getDeuda())}.`);
+        if (!isNaN(monto) && monto > destino.getDeudaConIntereses()) {
+          UIHelpers.showAlert('trans-alert','error',`El monto supera la deuda total (${fmt(destino.getDeudaConIntereses())}). Máximo a abonar: ${fmt(destino.getDeudaConIntereses())}.`);
           return;
         }
       }
@@ -645,7 +662,7 @@ class UIDashboard {
         this.#banco.save();
         const esTercero = tipo === 'tercero';
         const msg = destino instanceof TarjetaCredito
-          ? `Abono de ${fmt(monto)} aplicado. Saldo origen: ${fmt(cuentaOrigen.getSaldo())} · Deuda restante TC: ${fmt(destino.getDeuda())}.`
+          ? `Abono de ${fmt(monto)} aplicado. Saldo origen: ${fmt(cuentaOrigen.getSaldo())} · Deuda restante TC: ${fmt(destino.getDeudaConIntereses())}.`
           : esTercero
             ? `Transferencia de ${fmt(monto)} realizada. Nuevo saldo: ${fmt(cuentaOrigen.getSaldo())}.`
             : `Transferencia exitosa. Saldo origen: ${fmt(cuentaOrigen.getSaldo())} · Saldo destino: ${fmt(destino.getSaldo())}.`;
@@ -692,7 +709,7 @@ class UIDashboard {
           </div>
           <div class="mv-amount">
             <div class="mv-val ${cf.cls}">${cf.sign}${fmt(o.valor)}</div>
-            <div class="mv-saldo">Saldo: ${fmt(o.saldoPosterior)}</div>
+            <div class="mv-saldo">${cuenta instanceof TarjetaCredito ? `Cupo disp: ${fmt(cuenta.getCupoDisponible())}` : `Saldo: ${fmt(o.saldoPosterior)}`}</div>
           </div>
         </div>`;
     }).join('');
