@@ -233,7 +233,7 @@ class UIDashboard {
 
       const pagoMinimo = compras.reduce((s, c) => c.cuotasPagadas < c.cuotas ? s + c.cuotaMensual : s, 0);
 
-      const opcionesCuotas = compras.map((c, idx) => {
+      const opcionesCuotas = compras.filter(c => c.cuotasPagadas < c.cuotas).map((c, idx) => {
         const restantes   = c.cuotas - c.cuotasPagadas;
         const cuotasItems = Array.from({ length: c.cuotas }, (_, i) => {
           const num    = i + 1;
@@ -696,7 +696,7 @@ class UIDashboard {
       list.innerHTML = `<div class="info-box warn">${Icons.history}<span>No hay movimientos registrados en esta cuenta.</span></div>`;
       return;
     }
-// Formateamos cada movimiento utilizando la configuración definida para mostrar su información de manera clara y visualmente diferenciada según el tipo de movimiento, incluyendo el ícono, la descripción, la fecha, el valor con el signo correspondiente, y el saldo posterior al movimiento; luego unimos todos los elementos formateados en una sola cadena HTML para mostrar la lista completa de movimientos
+
     list.innerHTML = movs.map(m => {
       const o  = m.toObject();
       const cf = config[o.tipo] || { cls:'credit', icon: Icons.wallet, sign:'+' };
@@ -709,7 +709,7 @@ class UIDashboard {
           </div>
           <div class="mv-amount">
             <div class="mv-val ${cf.cls}">${cf.sign}${fmt(o.valor)}</div>
-            <div class="mv-saldo">${cuenta instanceof TarjetaCredito ? `Cupo disp: ${fmt(cuenta.getCupoDisponible())}` : `Saldo: ${fmt(o.saldoPosterior)}`}</div>
+            <div class="mv-saldo">${cuenta instanceof TarjetaCredito ? `Cupo disp: ${fmt(o.saldoPosterior)}` : `Saldo: ${fmt(o.saldoPosterior)}`}</div>
           </div>
         </div>`;
     }).join('');
@@ -722,9 +722,9 @@ class UIDashboard {
       <div class="profile-grid">
         <div class="op-card">
           <h4>Datos personales</h4>
-          <div class="form-group"><label>Identificación</label><input id="p-id" class="form-control" value="${cliente.getIdentificacion()}"></div>
-          <div class="form-group"><label>Nombre completo</label><input id="p-nombre" class="form-control" value="${cliente.getNombreCompleto()}"></div>
-          <div class="form-group"><label>Celular</label><input id="p-celular" class="form-control" value="${cliente.getCelular()}"></div>
+          <div class="form-group"><label>Identificación</label><input id="p-id" class="form-control" type="text" inputmode="numeric" maxlength="15" value="${cliente.getIdentificacion()}"></div>
+          <div class="form-group"><label>Nombre completo</label><input id="p-nombre" class="form-control" type="text" maxlength="60" value="${cliente.getNombreCompleto()}"></div>
+          <div class="form-group"><label>Celular</label><input id="p-celular" class="form-control" type="tel" inputmode="numeric" maxlength="10" value="${cliente.getCelular()}"></div>
           <div class="form-group"><label>Usuario</label><input class="form-control" value="${cliente.getUsuario()}" disabled style="opacity:.4"></div>
           <button class="btn-action" id="btn-guardar-perfil">Guardar cambios</button>
           <div id="perfil-alert" class="hidden" style="margin-top:12px"></div>
@@ -739,6 +739,10 @@ class UIDashboard {
         </div>
       </div>`;
 // Configuramos el evento para procesar la actualización del perfil al hacer clic en el botón correspondiente, validando los datos ingresados y mostrando un mensaje de éxito si el perfil se actualiza correctamente o un mensaje de error si ocurre algún problema; además, después de actualizar el perfil, se actualiza la barra lateral para reflejar los cambios en la información del cliente
+    document.getElementById('p-id').addEventListener('input', e => { e.target.value = e.target.value.replace(/\D/g, ''); });
+    document.getElementById('p-celular').addEventListener('input', e => { e.target.value = e.target.value.replace(/\D/g, ''); });
+    document.getElementById('p-nombre').addEventListener('input', e => { e.target.value = e.target.value.replace(/[^a-zA-ZáéíóúÁÉÍÓÚñÑüÜ\s]/g, ''); });
+
     document.getElementById('btn-guardar-perfil').addEventListener('click', () => {
       try {
         cliente.editarPerfil({
